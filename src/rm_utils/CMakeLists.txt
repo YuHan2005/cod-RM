@@ -41,6 +41,7 @@ add_library(${PROJECT_NAME} SHARED
   src/math/extended_kalman_filter.cpp
   src/url_resolver.cpp
   src/heartbeat.cpp
+  src/math/New_Extended_Kalman_Filter.cpp
 )
 
 set(dependencies
