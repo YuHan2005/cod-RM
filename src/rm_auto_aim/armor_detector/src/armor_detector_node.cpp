@@ -198,7 +198,8 @@ void ArmorDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
         // Optimize armor parallel to the ground only
         if (pnp_solution_selection_ && std::abs(armor.roll) < 10) {
           PnPSolutionsSelection(armor, rvec, tvec);
-        }
+  
+      }
 
         cv::Rodrigues(rvec, rotation_matrix);
         armor.rmat = rotation_matrix.clone();
@@ -207,19 +208,56 @@ void ArmorDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
         if (use_ba_) {
           // Optimize armor parallel to the ground only
           if (std::abs(armor.roll) < 10) {
-            tracked_armors_.push_back(armor);
+
+            if(armor.Close_Center){
+              if (tracked_armors_main_.empty()) {
+                tracked_armors_main_.push_back(armor);
+              } else{
+               const Armor &last = tracked_armors_main_.back();
+
+                // (1) 如果编号变了，说明目标切换
+                bool changed_number = (last.number != armor.number);
+
+                // (2) 如果中心跳变太大，认为丢锁/切换
+                cv::Point2f diff = last.center - armor.center;
+                float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+                bool too_far = (dist > 15.0f);
+
+                if (changed_number || too_far) {
+                  tracked_armors_main_.clear();
+                }
+
+                tracked_armors_main_.push_back(armor);
+              }
+      
+              // 控制窗口长度 = 5
+              if (tracked_armors_main_.size() > BA_WINDOW_TRACKED) {
+                tracked_armors_main_.pop_front();
+              }
+
+              // 对“正在跟踪目标”用多帧 BA
+              ba_solver_->solveBa(tracked_armors_main_, rotation_matrix);
+            }else{
+              // ========= 2) 其他目标：窗口 = 1，简单维护 =========
+              // 临时建一个只包含当前帧的 deque，当成单帧 BA 使用
+              std::deque<Armor> single_window;
+              single_window.push_back(armor);
+              ba_solver_->solveBa(single_window, rotation_matrix);
+            }
           }
 
           // Initially, We wanted to do multi-frame BA optimization and a
           // queue was used as input, but later we found that it didn't work well,
           // so we just fixed the queue size to 1.
-          if (tracked_armors_.size() > 1) {
-            tracked_armors_.pop_front();
-          }
+
+          //这里的MAX_WINDOW_SIZE请务必与BA优化函数中的保持一致
+          //if (tracked_armors_T_.size() > MAX_WINDOW_SIZE) {
+            //tracked_armors_T_.pop_front();
+          //
 
           // Use BA alogorithm to optimize the pose from PnP
           // solveBa() will modify the rotation_matrix
-          ba_solver_->solveBa(tracked_armors_, rotation_matrix);
+          //ba_solver_->solveBa(tracked_armors_, rotation_matrix);
         }
 
         // Fill basic info
@@ -335,6 +373,34 @@ std::vector<Armor> ArmorDetectorNode::detectArmors(
   auto img = cv_bridge::toCvShare(img_msg, "rgb8")->image;
 
   auto armors = detector_->detect(img);
+  
+   // 图像中心
+  cv::Point2f img_center(img.cols * 0.5f, img.rows * 0.5f);
+  // 找出距离中心最近的那一块
+  float best_dist = std::numeric_limits<float>::max();
+  int best_idx = -1;
+
+  for (int i = 0; i < static_cast<int>(armors.size()); ++i) {
+    auto &armor = armors[i];
+    cv::Point2f c = armor.center;
+
+    float dx = c.x - img_center.x;
+    float dy = c.y - img_center.y;
+    float dist = std::sqrt(dx * dx + dy * dy);
+
+    armor.distance_to_image_center = dist;
+
+    if (dist < best_dist) {
+      best_dist = dist;
+      best_idx = i;
+    }
+  }
+
+  // 给最近中心的那一块打标记
+  if (best_idx >= 0) {
+    armors[best_idx].Close_Center = true;
+  }
+
 
   auto final_time = this->now();
   auto latency = (final_time - img_msg->header.stamp).seconds() * 1000;
@@ -355,10 +421,18 @@ std::vector<Armor> ArmorDetectorNode::detectArmors(
     lights_data_pub_->publish(detector_->debug_lights);
     armors_data_pub_->publish(detector_->debug_armors);
 
+    /*
     if (!armors.empty()) {
       auto all_num_img = detector_->getAllNumbersImage();
       number_img_pub_.publish(
         *cv_bridge::CvImage(img_msg->header, "mono8", all_num_img).toImageMsg());
+    }*/
+
+    //少拷贝一次
+    if (!armors.empty()) {
+      auto all_num_img = detector_->getAllNumbersImage();
+      auto msg = cv_bridge::CvImage(img_msg->header, "mono8", all_num_img).toImageMsg();
+      number_img_pub_.publish(msg);   // 直接传 SharedPtr
     }
 
     detector_->drawResults(img);
@@ -377,6 +451,9 @@ std::vector<Armor> ArmorDetectorNode::detectArmors(
   return armors;
 }
 
+
+//只考虑先验条件，没有考虑重投影误差
+/*
 void ArmorDetectorNode::PnPSolutionsSelection(const Armor &armor,
                                               cv::Mat &rvec,
                                               cv::Mat &tvec) noexcept {
@@ -399,9 +476,75 @@ void ArmorDetectorNode::PnPSolutionsSelection(const Armor &armor,
   if (best_idx != 0) {
     FYT_DEBUG("armor_detector", "PnP Solution Changed!");
     rvec = rvecs[best_idx];
+
+    //可以尝试以下不做平均有什么效果
+    tvec = tvecs[best_idx];
+
     // Take average
-    tvec = std::accumulate(tvecs.begin(), tvecs.end(), cv::Mat::zeros(3, 1, CV_64F)) / tvecs.size();
+    //tvec = std::accumulate(tvecs.begin(), tvecs.end(), cv::Mat::zeros(3, 1, CV_64F)) / tvecs.size();
   }
+}*/
+
+//即考虑重投影有考虑先验条件
+void ArmorDetectorNode::PnPSolutionsSelection(const Armor &armor,
+                                              cv::Mat &rvec,
+                                              cv::Mat &tvec) noexcept
+{
+    // 拿到所有解
+    auto pnp_solutions = pnp_solver_->getAllSolutions();
+    auto &rvecs = pnp_solutions.at(0);
+    auto &tvecs = pnp_solutions.at(1);
+    if (rvecs.empty()) return;
+
+    // 拿到 3D / 2D 点
+    const auto &object_points = pnp_solver_->getCurrentObjectPoints();
+    const auto &image_points  = armor.landmarks();  // std::vector<cv::Point2f>
+
+    // pitch 先验
+    const double prior = (armor.number == "outpost"
+                          ? -FIFTTEN_DEGREE_RAD
+                          :  FIFTTEN_DEGREE_RAD);
+    
+    // 权重，现在是重投影为主导，因为先验不一定准确，这里看起来是先验更重要，但其实因为重投影的单位是像素
+    constexpr double W_PITCH  = 1.0;   // rad
+    constexpr double W_REPROJ = 0.1;   // pixel
+
+    size_t best_idx = 0;
+    double best_score = std::numeric_limits<double>::max();
+
+    for (size_t i = 0; i < rvecs.size(); ++i) {
+      // pitch 差
+      double pitch = rvecToRPY(rvecs[i], 1);
+      double pitch_diff = std::abs(pitch - prior);
+
+      // 重投影误差
+      std::vector<cv::Point2f> projected;
+      cv::projectPoints(object_points, rvecs[i], tvecs[i],
+                        pnp_solver_->cameraMatrix(),
+                        pnp_solver_->distCoeffs(),
+                        projected);
+
+      double err = 0.0;
+      for (size_t k = 0; k < projected.size(); ++k) {
+        cv::Point2f d = projected[k] - image_points[k];
+        err += d.dot(d);
+      }
+      err /= projected.size();  // 用均方误差即可
+
+      double score = W_PITCH * pitch_diff + W_REPROJ * err;
+      if (score < best_score) {
+        best_score = score;
+        best_idx = i;
+      }
+    }
+
+    if (best_idx != 0) {
+      FYT_DEBUG("armor_detector", "PnP Solution Changed to idx {}", best_idx);
+    }
+
+    // 选同一个 idx 的 rvec / tvec
+    rvec = rvecs[best_idx];
+    tvec = tvecs[best_idx];
 }
 
 double ArmorDetectorNode::rvecToRPY(const cv::Mat &rvec, int axis) const noexcept {

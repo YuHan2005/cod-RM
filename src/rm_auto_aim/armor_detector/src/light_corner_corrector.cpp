@@ -42,6 +42,52 @@ void LightCornerCorrector::correctCorners(Armor &armor, const cv::Mat &gray_img)
   }
 }
 
+//精度降低，速度加快
+SymmetryAxis LightCornerCorrector::findSymmetryAxis(const cv::Mat &gray_img,
+                                                    const Light &light) {
+  constexpr float SCALE = 0.07f;
+
+  cv::Rect light_box = light.boundingRect();
+  light_box.x      -= static_cast<int>(light_box.width  * SCALE);
+  light_box.y      -= static_cast<int>(light_box.height * SCALE);
+  light_box.width  += static_cast<int>(light_box.width  * SCALE * 2);
+  light_box.height += static_cast<int>(light_box.height * SCALE * 2);
+
+  // 边界裁剪
+  light_box &= cv::Rect(0, 0, gray_img.cols, gray_img.rows);
+  if (light_box.empty()) {
+    return SymmetryAxis{.centroid = light.center,
+                        .direction = cv::Point2f(0.f, 1.f),
+                        .mean_val  = 0.f};
+  }
+
+  cv::Mat roi = gray_img(light_box);
+
+  // 保存原始平均亮度，供 findCorner 使用
+  float mean_val = static_cast<float>(cv::mean(roi)[0]);
+
+  // 用空间矩 + 灰度作为权重（cv::moments 支持灰度权重）
+  cv::Moments mom = cv::moments(roi, false);
+
+  cv::Point2f centroid(static_cast<float>(mom.m10 / mom.m00),
+                       static_cast<float>(mom.m01 / mom.m00));
+  centroid += cv::Point2f(static_cast<float>(light_box.x),
+                          static_cast<float>(light_box.y));
+
+  // 计算主方向角
+  double mu20 = mom.mu20 / mom.m00;
+  double mu02 = mom.mu02 / mom.m00;
+  double mu11 = mom.mu11 / mom.m00;
+  double theta = 0.5 * std::atan2(2.0 * mu11, mu20 - mu02);
+
+  cv::Point2f axis(static_cast<float>(std::cos(theta)),
+                   static_cast<float>(std::sin(theta)));
+
+  return SymmetryAxis{.centroid = centroid, .direction = axis, .mean_val = mean_val};
+}
+
+//原PCA
+/*
 SymmetryAxis LightCornerCorrector::findSymmetryAxis(const cv::Mat &gray_img, const Light &light) {
   constexpr float MAX_BRIGHTNESS = 25;
   constexpr float SCALE = 0.07;
@@ -95,7 +141,7 @@ SymmetryAxis LightCornerCorrector::findSymmetryAxis(const cv::Mat &gray_img, con
 
   return SymmetryAxis{.centroid = centroid, .direction = axis, .mean_val = mean_val};
 }
-
+  */
 cv::Point2f LightCornerCorrector::findCorner(const cv::Mat &gray_img,
                                              const Light &light,
                                              const SymmetryAxis &axis,

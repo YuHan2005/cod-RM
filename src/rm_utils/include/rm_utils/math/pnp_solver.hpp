@@ -41,8 +41,17 @@ public:
     rvecs_.clear();
     tvecs_.clear();
     if (auto it = object_points_map_.find(coord_frame_name); it != object_points_map_.end()) {
-      auto object_points = it->second;
-      int solutions = cv::solvePnPGeneric(object_points,
+
+
+      current_object_points_ = it->second;
+
+      if (current_object_points_.size() != static_cast<size_t>(image_points.total())) {
+          // 打个 log 或者直接 return false
+          FYT_ERROR("pnp_solver.hpp", "数量不对应无法计算 PnP！");
+          return false;
+      }
+
+      int solutions = cv::solvePnPGeneric(current_object_points_,
                                           image_points,
                                           camera_matrix_,
                                           distortion_coefficients_,
@@ -50,19 +59,28 @@ public:
                                           tvecs_,
                                           false,
                                           method_);
+                            
       if (solutions > 0) {
         int rdepth = rvec.empty() ? CV_64F : rvec.depth();
         int tdepth = tvec.empty() ? CV_64F : tvec.depth();
         rvecs_[0].convertTo(rvec, rdepth);
         tvecs_[0].convertTo(tvec, tdepth);
       }
-      return solutions > 0;
-    } else {
+     
+        return solutions > 0;
+    }
+    else {
       return false;
     }
   }
 
   std::vector<std::vector<cv::Mat>> getAllSolutions() const noexcept { return {rvecs_, tvecs_}; }
+
+  const std::vector<cv::Point3f>& getCurrentObjectPoints() const noexcept { return current_object_points_;}
+
+  const cv::Mat& cameraMatrix() const noexcept { return camera_matrix_;}
+
+  const cv::Mat& distCoeffs() const noexcept { return distortion_coefficients_;}
 
   // Calculate the distance between armor center and image center
   float calculateDistanceToCenter(const cv::Point2f &image_point) const noexcept;
@@ -76,6 +94,7 @@ private:
   cv::SolvePnPMethod method_;
   std::vector<cv::Mat> rvecs_;
   std::vector<cv::Mat> tvecs_;
+  std::vector<cv::Point3f> current_object_points_;
 };
 }  // namespace fyt
 #endif  // RM_UTILS_PNP_SOLVER_HPP_

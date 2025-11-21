@@ -113,7 +113,10 @@ private:
   // Target subscription
   // rclcpp::Subscription<rm_interfaces::msg::Target>::SharedPtr target_sub_;
   // rm_interfaces::msg::Target::SharedPtr tracked_target_;
-  std::deque<Armor> tracked_armors_;
+  //std::deque<Armor> tracked_armors_;
+  std::deque<Armor> tracked_armors_main_;
+
+
 
   // ReceiveData subscripiton
   std::string odom_frame_;
@@ -137,6 +140,10 @@ private:
   image_transport::Publisher binary_img_pub_;
   image_transport::Publisher number_img_pub_;
   image_transport::Publisher result_img_pub_;
+
+
+  //new
+  static constexpr size_t BA_WINDOW_TRACKED = 5;
 };
 
 }  // namespace fyt::auto_aim

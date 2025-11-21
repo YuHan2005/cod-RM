@@ -90,83 +90,104 @@ std::vector<Light> Detector::findLights(const cv::Mat &rgb_img,
   this->debug_lights.data.clear();
 
   for (const auto &contour : contours) {
-    //-----
-    if (1)  //写个开关
-    { FYT_INFO("armor_detector", "最小二乘法!");
-      auto b_rect = cv::boundingRect(contour);
-      auto r_rect = cv::minAreaRect(contour);
-      cv::Mat mask = cv::Mat::zeros(b_rect.size(), CV_8UC1);
-      std::vector<cv::Point> mask_contour;
-      for (const auto &p : contour) {
-        mask_contour.emplace_back(p - cv::Point(b_rect.x, b_rect.y));
-      }
-      cv::fillPoly(mask, {mask_contour}, 255);
-      std::vector<cv::Point> points;
-      cv::findNonZero(mask, points);
-      bool is_fill_rotated_rect =
-        points.size() / (r_rect.size.width * r_rect.size.height) > l.min_fill_ratio;
-      cv::Vec4f return_param;
-      cv::fitLine(points, return_param, cv::DIST_L2, 0, 0.01, 0.01);
-      cv::Point2f top, bottom;
-      double angle_k;
-      if (int(return_param[0] * 100) == 100 || int(return_param[1] * 100) == 0) {
-        top = cv::Point2f(b_rect.x + b_rect.width / 2, b_rect.y);
-        bottom = cv::Point2f(b_rect.x + b_rect.width / 2, b_rect.y + b_rect.height);
-        angle_k = 0;
-      } else {
-        auto k = return_param[1] / return_param[0];
-        auto b = (return_param[3] + b_rect.y) - k * (return_param[2] + b_rect.x);
-        top = cv::Point2f((b_rect.y - b) / k, b_rect.y);
-        bottom = cv::Point2f((b_rect.y + b_rect.height - b) / k, b_rect.y + b_rect.height);
-        angle_k = std::atan(k) / CV_PI * 180 - 90;
-        if (angle_k > 90) {
-          angle_k = 180 - angle_k;
-        }
-      }
-      auto light2 = Light2(b_rect, top, bottom, points.size(), angle_k);
+    if (contour.empty()) continue;
 
-      if (isLight2(light2) && is_fill_rotated_rect) {
-        auto rect = light2;
-        if (  // Avoid assertion failed
-          0 <= rect.x && 0 <= rect.width && rect.x + rect.width <= rgb_img.cols && 0 <= rect.y &&
-          0 <= rect.height && rect.y + rect.height <= rgb_img.rows) {
-          int sum_r = 0, sum_b = 0;
-          auto roi = rgb_img(rect);
-          // Iterate through the ROI
-          for (int i = 0; i < roi.rows; i++) {
-            for (int j = 0; j < roi.cols; j++) {
-              if (cv::pointPolygonTest(contour, cv::Point2f(j + rect.x, i + rect.y), false) >= 0) {
-                // if point is inside contour
-                sum_r += roi.at<cv::Vec3b>(i, j)[0];
-                sum_b += roi.at<cv::Vec3b>(i, j)[2];
-              }
+    auto b_rect = cv::boundingRect(contour);
+    auto r_rect = cv::minAreaRect(contour);
+
+    /*
+    cv::Mat mask = cv::Mat::zeros(b_rect.size(), CV_8UC1);
+    std::vector<cv::Point> mask_contour;
+    for (const auto &p : contour) {
+      mask_contour.emplace_back(p - cv::Point(b_rect.x, b_rect.y));
+    }
+    cv::fillPoly(mask, {mask_contour}, 255);
+    std::vector<cv::Point> points;
+    cv::findNonZero(mask, points);
+    bool is_fill_rotated_rect =
+      points.size() / (r_rect.size.width * r_rect.size.height) > l.min_fill_ratio;*/
+
+    double contour_area = cv::contourArea(contour);
+    double rect_area = r_rect.size.width * r_rect.size.height;
+    bool is_fill_rotated_rect =
+        rect_area > 0 && contour_area / rect_area > l.min_fill_ratio;
+
+
+    cv::Vec4f return_param;
+
+    //cv::fitLine(points, return_param, cv::DIST_L2, 0, 0.01, 0.01);
+
+    cv::fitLine(contour, return_param, cv::DIST_L2, 0, 0.01, 0.01);
+ 
+
+    cv::Point2f top, bottom;
+    double angle_k;
+
+    float vx = return_param[0];
+    float vy = return_param[1];
+    const float eps = 1e-3f;
+    if (std::fabs(vx) < eps){
+      // 竖直灯条，直接用竖直
+      top  = cv::Point2f(b_rect.x + b_rect.width * 0.5f, b_rect.y);
+      bottom = cv::Point2f(b_rect.x + b_rect.width * 0.5f, b_rect.y + b_rect.height);
+      angle_k = 0.0;  // 或者 90，看你定义
+    }
+    else{
+      float k = vy / vx;
+      auto b = (return_param[3] + b_rect.y) - k * (return_param[2] + b_rect.x);
+      top = cv::Point2f((b_rect.y - b) / k, b_rect.y);
+      bottom = cv::Point2f((b_rect.y + b_rect.height - b) / k, b_rect.y + b_rect.height);
+      float angle = std::atan2(vy, vx) * 180.0f / CV_PI;  // 与 x 轴夹角
+      // 与水平线夹角（0~90），不需要减 90 再折返
+      float tilt = std::fabs(angle);
+      if (tilt > 90.0f) tilt = 180.0f - tilt;
+      angle_k = tilt;
+    }
+
+/*
+    if (int(return_param[0] * 100) == 100 || int(return_param[1] * 100) == 0) {
+      top = cv::Point2f(b_rect.x + b_rect.width / 2, b_rect.y);
+      bottom = cv::Point2f(b_rect.x + b_rect.width / 2, b_rect.y + b_rect.height);
+      angle_k = 0;
+    } else {
+      auto k = return_param[1] / return_param[0];
+      auto b = (return_param[3] + b_rect.y) - k * (return_param[2] + b_rect.x);
+      top = cv::Point2f((b_rect.y - b) / k, b_rect.y);
+      bottom = cv::Point2f((b_rect.y + b_rect.height - b) / k, b_rect.y + b_rect.height);
+      angle_k = std::atan(k) / CV_PI * 180 - 90;
+      if (angle_k > 90) {
+        angle_k = 180 - angle_k;
+      }
+    }*/
+
+
+
+    auto light2 = Light2(b_rect, top, bottom, points.size(), angle_k);
+
+    if (isLight2(light2) && is_fill_rotated_rect) {
+      auto rect = light2;
+      if (  // Avoid assertion failed
+        0 <= rect.x && 0 <= rect.width && rect.x + rect.width <= rgb_img.cols && 0 <= rect.y &&
+        0 <= rect.height && rect.y + rect.height <= rgb_img.rows) {
+        int sum_r = 0, sum_b = 0;
+        auto roi = rgb_img(rect);
+        // Iterate through the ROI
+        for (int i = 0; i < roi.rows; i++) {
+          for (int j = 0; j < roi.cols; j++) {
+            if (cv::pointPolygonTest(contour, cv::Point2f(j + rect.x, i + rect.y), false) >= 0) {
+              // if point is inside contour
+              sum_r += roi.at<cv::Vec3b>(i, j)[0];
+              sum_b += roi.at<cv::Vec3b>(i, j)[2];
             }
           }
-          // Sum of red pixels > sum of blue pixels ?
-          auto light=Light(contour);
-          light.color = sum_r > sum_b ? EnemyColor::RED : EnemyColor::BLUE;
-          lights.emplace_back(light);
         }
-      }
-
-    } else {
-      
-      if (contour.size() < 6) continue;
-      auto light = Light(contour);
-
-      if (isLight(light)) {
-        int sum_r = 0, sum_b = 0;
-        for (const auto &point : contour) {
-          sum_r += rgb_img.at<cv::Vec3b>(point.y, point.x)[0];
-          sum_b += rgb_img.at<cv::Vec3b>(point.y, point.x)[2];
-        }
-        if (std::abs(sum_r - sum_b) / static_cast<int>(contour.size()) >
-            light_params.color_diff_thresh) {
-          light.color = sum_r > sum_b ? EnemyColor::RED : EnemyColor::BLUE;
-        }
+        // Sum of red pixels > sum of blue pixels ?
+        auto light=Light(contour);
+        light.color = sum_r > sum_b ? EnemyColor::RED : EnemyColor::BLUE;
         lights.emplace_back(light);
       }
     }
+
   }
   std::sort(lights.begin(), lights.end(), [](const Light &l1, const Light &l2) {
     return l1.center.x < l2.center.x;

@@ -87,8 +87,11 @@ struct Light : public cv::RotatedRect {
     top = (p[0] + p[1]) / 2;
     bottom = (p[2] + p[3]) / 2;
 
-    length = cv::norm(top - bottom);
-    width = cv::norm(p[0] - p[1]);
+    //length = cv::norm(top - bottom);
+    //width = cv::norm(p[0] - p[1]);
+    // 长宽直接用 RotatedRect 的 size，更稳定
+    length = std::max(this->size.width, this->size.height);
+    width  = std::min(this->size.width, this->size.height);
 
     // Calculate the tilt angle
     // The angle is the angle between the light bar and the horizontal line
@@ -109,9 +112,15 @@ struct Light2 : public cv::Rect
   explicit Light2(cv::Rect box, cv::Point2f top, cv::Point2f bottom, int area, float tilt_angle)
   : cv::Rect(box), top(top), bottom(bottom), tilt_angle(tilt_angle)
   {
+    //length = cv::norm(top - bottom);
+    //width = area / length;
+    //center = (top + bottom) / 2;
+
     length = cv::norm(top - bottom);
-    width = area / length;
-    center = (top + bottom) / 2;
+    width  = (length > 0.0)
+                 ? static_cast<double>(area) / length
+                 : 0.0;
+    center = (top + bottom) * 0.5f;
   }
 
   int color;
@@ -137,6 +146,9 @@ struct Armor {
     }
 
     center = (left_light.center + right_light.center) / 2;
+
+    Close_Center = false;
+
   }
 
   // Build the points in the object coordinate system, start from bottom left in
@@ -189,6 +201,10 @@ struct Armor {
   std::string number;
   float confidence;
   std::string classfication_result;
+
+  bool Close_Center;
+  float distance_to_image_center;
+
 };
 
 }  // namespace fyt::auto_aim

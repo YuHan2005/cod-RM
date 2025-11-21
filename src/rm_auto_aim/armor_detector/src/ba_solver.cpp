@@ -50,6 +50,135 @@ BaSolver::BaSolver(std::array<double, 9> &camera_matrix, std::vector<double> &di
   lm_algorithm_->setUserLambdaInit(0.1);
 }
 
+
+
+//AI提供的BA优化函数
+bool BaSolver::solveBa(const std::deque<Armor> &armors, cv::Mat &rmat) noexcept {
+  if (armors.empty()) {
+    return true;
+  }
+
+  size_t MAX_WINDOW_SIZE = 1;
+  // ====== 1. 限制小窗口：只用最近 N 帧 ======
+  if(armors[armors.size()-1].Close_Center==true)
+  {
+      MAX_WINDOW_SIZE=5;
+  }
+  const size_t total_frames = armors.size();
+  const size_t used_frames = std::min(total_frames, MAX_WINDOW_SIZE);
+
+  auto it_begin = armors.end() - used_frames;  // 从队尾往前取 used_frames 帧
+
+  // ====== 2. 重置优化器 ======
+  optimizer_.clear();
+
+  // 装甲板尺寸：这里假设窗口里类型一致，用最后一帧的类型也可以
+  const Armor &ref_armor = armors.back();
+  Eigen::Vector2d armor_size =
+    (ref_armor.type == ArmorType::SMALL)
+      ? Eigen::Vector2d(SMALL_ARMOR_WIDTH, SMALL_ARMOR_HEIGHT)
+      : Eigen::Vector2d(LARGE_ARMOR_WIDTH, LARGE_ARMOR_HEIGHT);
+
+  // ====== 3. 用最后一帧算一个初始 yaw，作为共享顶点的初值 ======
+  {
+    Eigen::Matrix3d camera2armor = utils::cvToEigen(ref_armor.rmat);
+    Eigen::Matrix3d imu2camera   = ref_armor.imu2camera;
+    Eigen::Matrix3d imu2armor    = imu2camera * camera2armor;
+
+    auto theta_by_sin = std::asin(-imu2armor(0, 1));
+    auto theta_by_cos = std::acos(imu2armor(1, 1));
+
+    double initial_yaw;
+    if (std::abs(theta_by_sin) > 1e-5) {
+      initial_yaw = (theta_by_sin > 0) ? theta_by_cos : -theta_by_cos;
+    } else {
+      initial_yaw = (imu2armor(1, 1) > 0) ? 0.0 : CV_PI;
+    }
+
+    // ====== 4. 创建“一个共享 yaw 顶点” ======
+    VertexYaw *v_yaw = new VertexYaw();
+    v_yaw->setId(0);  // 只有一个 yaw 顶点，id 设成 0 即可
+    Eigen::Matrix<double, 1, 1> yaw_vec;
+    yaw_vec << initial_yaw;
+    v_yaw->setEstimate(yaw_vec);
+    optimizer_.addVertex(v_yaw);
+  }
+
+  // 取出刚刚添加的 yaw 顶点
+  auto *v_yaw_shared = dynamic_cast<VertexYaw *>(optimizer_.vertex(0));
+
+  // ====== 5. 为窗口内每一帧添加一个投影边（都连到同一个 yaw 顶点） ======
+  int edge_id = 1;
+  for (auto it = it_begin; it != armors.end(); ++it) {
+    const Armor &armor = *it;
+
+    // 坐标系转换
+    Eigen::Matrix3d camera2armor = utils::cvToEigen(armor.rmat);
+    Eigen::Matrix3d imu2camera   = armor.imu2camera;
+    Eigen::Matrix3d camera2imu   = imu2camera.transpose();
+
+    // 装甲板中心在相机坐标系下的位置（PnP 给的 tvec）
+    Eigen::Vector3d armor_position_3d = utils::cvToEigen(armor.tvec);
+
+    // pitch：仍然用你原来的 outpost 特殊逻辑
+    double armor_pitch =
+      (armor.number == "outpost" ? -FIFTTEN_DEGREE_RAD : FIFTTEN_DEGREE_RAD);
+
+    // 2D 角点观测打包成向量
+    Eigen::Matrix<double, Armor::N_LANDMARKS_2, 1> armor_landmarks_2d;
+    auto landmarks = armor.landmarks();
+    for (size_t i = 0; i < Armor::N_LANDMARKS; ++i) {
+      armor_landmarks_2d(2 * i)     = landmarks[i].x;
+      armor_landmarks_2d(2 * i + 1) = landmarks[i].y;
+    }
+
+    // 边：同一个 yaw，多个相机位姿 / tvec / 角点观测
+    EdgeProjection *edge = new EdgeProjection(
+      Sophus::SO3d(camera2imu),
+      armor_position_3d,
+      cam_internal_k_,
+      armor_size,
+      armor_pitch);
+
+    edge->setId(edge_id++);
+    edge->setVertex(0, v_yaw_shared);  // 关键：所有边都连到同一个 yaw 顶点
+    edge->setMeasurement(armor_landmarks_2d);
+    edge->setInformation(EdgeProjection::InfoMatrixType::Identity());
+
+    // 鲁棒核保持不变
+    g2o::RobustKernel *robustKernel =
+      g2o::RobustKernelFactory::instance()->construct("Fair");
+    dynamic_cast<g2o::RobustKernelFair *>(robustKernel)->setDelta(2);
+    edge->setRobustKernel(robustKernel);
+
+    optimizer_.addEdge(edge);
+  }
+
+  // ====== 6. 开始优化 ======
+  optimizer_.initializeOptimization();
+  optimizer_.optimize(20);
+
+  // ====== 7. 取出优化后的 yaw（共享顶点） ======
+  double yaw_optimized = v_yaw_shared->estimate()(0);
+
+  // ====== 8. 用“最后一帧”的 imu2camera + 优化 yaw + 固定 pitch 生成最终 R ======
+  double pitch_optimized =
+    (ref_armor.number == "outpost" ? -FIFTTEN_DEGREE_RAD : FIFTTEN_DEGREE_RAD);
+
+  Eigen::Vector3d euler_in_imu_frame(0.0, pitch_optimized, yaw_optimized);
+  Eigen::Matrix3d imu2armor_optimized =
+    utils::eulerToMatrix(euler_in_imu_frame, utils::EulerOrder::XYZ);
+
+  Eigen::Matrix3d rmat_optimized =
+    ref_armor.imu2camera.transpose() * imu2armor_optimized;
+
+  rmat = utils::eigenToCv(rmat_optimized);
+
+  return true;
+}
+
+//AI说这段写得有问题，但是暂时看不懂，尝试使用AI提供的代码
+/*
 bool BaSolver::solveBa(const std::deque<Armor> &armors, cv::Mat &rmat) noexcept {
   if (armors.empty()) {
     return true;
@@ -140,5 +269,6 @@ bool BaSolver::solveBa(const std::deque<Armor> &armors, cv::Mat &rmat) noexcept 
 
   return true;
 }
+  */
 
 }  // namespace fyt::auto_aim
