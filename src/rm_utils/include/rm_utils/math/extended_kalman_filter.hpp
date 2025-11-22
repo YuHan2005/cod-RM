@@ -22,6 +22,9 @@
 
 #include <Eigen/Dense>
 #include <functional>
+#include "rm_utils/logger/log.hpp"
+#include <deque>
+#include <numeric>  // std::accumulate
 
 namespace fyt {
 
@@ -49,6 +52,14 @@ public:
 
   // Update the estimated state based on measurement
   Eigen::MatrixXd update(const Eigen::VectorXd &z) noexcept;
+
+  //NIS门控  
+  double lastNis()    const noexcept { return last_nis_; }
+  bool   lastNisOk()  const noexcept { return last_nis_ok_; } 
+  size_t total_updates_;
+  size_t nis_fail_count_;
+  std::deque<int> recent_nis_failures_;   
+
 
 private:
   // Process nonlinear vector function
@@ -86,6 +97,15 @@ private:
   Eigen::VectorXd x_pri;
   // Posteriori state
   Eigen::VectorXd x_post;
+
+  //NIS门控
+  double last_nis_    = 0.0;
+  bool   last_nis_ok_ = true;
+  double nis_threshold_ = 9.5;   // 由外部设置，如卡方阈值
+  std::size_t  nis_window_size_ = 100;  // 比如最近 100 次
+  double recent_fail_ratio_ = 0.0;
+
+
 };
 
 }  // namespace fyt

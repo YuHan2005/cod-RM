@@ -87,6 +87,9 @@ void Tracker::update(const Armors::SharedPtr &armors_msg) noexcept {
     auto predicted_position = getArmorPositionFromState(ekf_prediction);
     double min_position_diff = DBL_MAX;
     double yaw_diff = DBL_MAX;
+    Armor best_armor;
+    bool has_best = false;
+
     for (const auto &armor : armors_msg->armors) {
       // Only consider armors with the same id
       if (armor.number == tracked_id) {
@@ -97,10 +100,15 @@ void Tracker::update(const Armors::SharedPtr &armors_msg) noexcept {
         auto p = armor.pose.position;
         Eigen::Vector3d position_vec(p.x, p.y, p.z);
         double position_diff = (predicted_position - position_vec).norm();
+
+
         if (position_diff < min_position_diff) {
           // Find the closest armor
           min_position_diff = position_diff;
-          yaw_diff = abs(orientationToYaw(armor.pose.orientation) - ekf_prediction(6));
+          //yaw_diff = abs(orientationToYaw(armor.pose.orientation) - ekf_prediction(6));
+          best_armor = armor;
+          has_best = true;
+          /*
           tracked_armor = armor;
           // Update tracked armor type
           if (tracked_armor.type == "large" &&
@@ -110,9 +118,24 @@ void Tracker::update(const Armors::SharedPtr &armors_msg) noexcept {
             tracked_armors_num = ArmorsNum::OUTPOST_3;
           } else {
             tracked_armors_num = ArmorsNum::NORMAL_4;
-          }
+          }*/
         }
       }
+    }
+    if(has_best) {
+      tracked_armor = best_armor;
+      double measured_yaw = orientationToYaw(tracked_armor.pose.orientation);
+      double yaw_err      = angles::shortest_angular_distance(ekf_prediction(6), measured_yaw);
+      yaw_diff = std::abs(yaw_err);
+        // Update tracked armor type
+        if (tracked_armor.type == "large" &&
+            (tracked_id == "3" || tracked_id == "4" || tracked_id == "5")) {
+          tracked_armors_num = ArmorsNum::BALANCE_2;
+        } else if (tracked_id == "outpost") {
+          tracked_armors_num = ArmorsNum::OUTPOST_3;
+        } else {
+          tracked_armors_num = ArmorsNum::NORMAL_4;
+        }
     }
 
     // Store tracker info
@@ -128,7 +151,18 @@ void Tracker::update(const Armors::SharedPtr &armors_msg) noexcept {
       // Update EKF
       double measured_yaw = orientationToYaw(tracked_armor.pose.orientation);
       measurement = Eigen::Vector4d(p.x, p.y, p.z, measured_yaw);
+
+      //NIS门控
       target_state = ekf.update(measurement);
+      // 如果 NIS 判定“不一致”，则等价于：这帧测量被拒绝
+      /*
+      if (!ekf.lastNisOk()) {
+        // 1) 不要把这次更新当作"真匹配"
+        matched = false;
+      }*/
+      
+
+
     } else if (same_id_armors_count == 1 && yaw_diff > max_match_yaw_diff_) {
       // Matched armor not found, but there is only one armor with the same id
       // and yaw has jumped, take this case as the target is spinning and armor
@@ -201,6 +235,9 @@ void Tracker::initEKF(const Armor &a) noexcept {
   target_state << xc, 0, yc, 0, za, 0, yaw, 0, r;
 
   ekf.setState(target_state);
+  ekf.total_updates_ = 0;
+  ekf.nis_fail_count_ = 0;
+  ekf.recent_nis_failures_.clear();
 }
 
 void Tracker::handleArmorJump(const Armor &current_armor) noexcept {

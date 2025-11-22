@@ -32,4 +32,4 @@
       compenstator_type: "resistance" #ideal或resistance
       gravity: 10.0
       resistance: 0.092
-      iteration_times: 50 # 补偿的迭代次数
+      iteration_times: 30 # 补偿的迭代次数

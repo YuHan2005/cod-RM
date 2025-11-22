@@ -130,6 +130,7 @@ rm_interfaces::msg::GimbalCmd Solver::solve(const rm_interfaces::msg::Target &ta
 
       // If isOnTarget() never returns true, adjust controller_delay to force the gimbal to move
       if (controller_delay_ != 0) {
+        /*
         target_position.x() += controller_delay_ * target.velocity.x;
         target_position.y() += controller_delay_ * target.velocity.y;
         target_position.z() += controller_delay_ * target.velocity.z;
@@ -144,7 +145,10 @@ rm_interfaces::msg::GimbalCmd Solver::solve(const rm_interfaces::msg::Target &ta
         if (chosen_armor_position.norm() < 0.1) {
           throw std::runtime_error("No valid armor to shoot");
         }
-        calcYawAndPitch(chosen_armor_position, rpy, yaw, pitch);
+        calcYawAndPitch(chosen_armor_position, rpy, yaw, pitch);*/
+        //尝试不再重新计算装甲板位置，直接补偿角度
+        yaw += controller_delay_ * target.v_yaw;
+
       }
       break;
     }
